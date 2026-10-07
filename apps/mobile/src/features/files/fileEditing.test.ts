@@ -25,7 +25,11 @@ function canEdit(relativePath: string, file: ProjectReadFileResult | null = read
 
 describe("editor text line endings", () => {
   it("leaves an LF file unchanged", () => {
-    expect(toEditorText("one\ntwo\n")).toEqual({ text: "one\ntwo\n", lineEnding: "\n" });
+    expect(toEditorText("one\ntwo\n")).toEqual({
+      text: "one\ntwo\n",
+      lineEnding: "\n",
+      hasUtf8Bom: false,
+    });
     expect(fromEditorText("one\ntwo\n", "\n")).toBe("one\ntwo\n");
   });
 
@@ -33,7 +37,7 @@ describe("editor text line endings", () => {
     const contents = "one\r\ntwo\r\n";
     const editor = toEditorText(contents);
 
-    expect(editor).toEqual({ text: "one\ntwo\n", lineEnding: "\r\n" });
+    expect(editor).toEqual({ text: "one\ntwo\n", lineEnding: "\r\n", hasUtf8Bom: false });
     expect(fromEditorText(editor.text, editor.lineEnding)).toBe(contents);
   });
 
@@ -43,6 +47,18 @@ describe("editor text line endings", () => {
 
     expect(fromEditorText(editor.text, editor.lineEnding)).toBe(contents);
     expect(toEditorText("one\ntwo").text).toBe("one\ntwo");
+  });
+
+  it("keeps the UTF-8 BOM outside the editable text and restores it with CRLF", () => {
+    const contents = "\uFEFFone\r\ntwo\r\n";
+    const editor = toEditorText(contents);
+
+    expect(editor.text).toBe("one\ntwo\n");
+    expect(editor.hasUtf8Bom).toBe(true);
+    expect(fromEditorText(editor.text, editor.lineEnding, editor.hasUtf8Bom)).toBe(contents);
+    expect(fromEditorText("edited\n", editor.lineEnding, editor.hasUtf8Bom)).toBe(
+      "\uFEFFedited\r\n",
+    );
   });
 
   it("does not double the CR of a CRLF the editor already holds", () => {

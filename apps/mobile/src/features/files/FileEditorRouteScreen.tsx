@@ -48,10 +48,11 @@ interface FileEditorDraft {
   readonly text: string;
   readonly loadedText: string;
   readonly lineEnding: EditorLineEnding;
+  readonly hasUtf8Bom: boolean;
   readonly revision: string;
 }
 
-const NOT_EDITABLE_DETAIL = `Only complete workspace text files under ${
+const NOT_EDITABLE_DETAIL = `Only complete UTF-8 workspace text files under ${
   MAX_EDITABLE_FILE_BYTES / 1024
 } KB can be edited on mobile.`;
 
@@ -78,6 +79,7 @@ function loadedDraft(input: {
     text: converted.text,
     loadedText: converted.text,
     lineEnding: converted.lineEnding,
+    hasUtf8Bom: converted.hasUtf8Bom,
     revision: file.revision,
   };
 }
@@ -122,7 +124,7 @@ export function FileEditorRouteScreen(props: FileEditorRouteScreenProps) {
       input: {
         cwd,
         relativePath,
-        contents: fromEditorText(edited.text, edited.lineEnding),
+        contents: fromEditorText(edited.text, edited.lineEnding, edited.hasUtf8Bom),
         ...(options?.overwrite === true ? {} : { expectedRevision: edited.revision }),
       },
     });
@@ -239,6 +241,7 @@ export function FileEditorRouteScreen(props: FileEditorRouteScreenProps) {
           <TextInput
             key={`${draft.revision}:${reloadCount}`}
             multiline
+            editable={!saving && !saved && canWriteFiles}
             scrollEnabled
             autoCapitalize="none"
             autoCorrect={false}

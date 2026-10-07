@@ -44,16 +44,24 @@ export function canEditWorkspaceFile(input: {
 export function toEditorText(contents: string): {
   readonly text: string;
   readonly lineEnding: EditorLineEnding;
+  readonly hasUtf8Bom: boolean;
 } {
-  return contents.includes("\r\n")
-    ? { text: contents.replaceAll("\r\n", "\n"), lineEnding: "\r\n" }
-    : { text: contents, lineEnding: "\n" };
+  const hasUtf8Bom = contents.startsWith("\uFEFF");
+  const text = hasUtf8Bom ? contents.slice(1) : contents;
+  return {
+    text: text.replaceAll("\r\n", "\n"),
+    lineEnding: text.includes("\r\n") ? "\r\n" : "\n",
+    hasUtf8Bom,
+  };
 }
 
-export function fromEditorText(text: string, lineEnding: EditorLineEnding): string {
-  if (lineEnding === "\n") {
-    return text;
-  }
+export function fromEditorText(
+  text: string,
+  lineEnding: EditorLineEnding,
+  hasUtf8Bom = false,
+): string {
   // Normalize first: an input method can insert its own CRLF into the LF text.
-  return text.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n");
+  const contents =
+    lineEnding === "\r\n" ? text.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n") : text;
+  return (hasUtf8Bom ? "\uFEFF" : "") + contents;
 }
