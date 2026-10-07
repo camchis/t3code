@@ -1,4 +1,5 @@
 import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
+import { useAtomValue } from "@effect/atom-react";
 import { environmentSession } from "../../state/session";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
@@ -53,6 +54,7 @@ import { WorkspaceFileImagePreview } from "./WorkspaceFileImagePreview";
 import { WorkspaceFilePreviewError } from "./WorkspaceFilePreviewError";
 import { WorkspaceFileVideoPreview } from "./WorkspaceFileVideoPreview";
 import { WorkspaceFileWebPreview } from "./WorkspaceFileWebPreview";
+import { canEditWorkspaceFile } from "./fileEditing";
 import {
   basename,
   fileHeaderSubtitle,
@@ -105,6 +107,8 @@ function FileHeader(props: {
   readonly iconColor: string;
   readonly activeMode: string;
   readonly fileInspectorSupported: boolean;
+  readonly canEditFile: boolean;
+  readonly onEditFile: () => void;
   readonly onBack: () => void;
   readonly onReturnToThread: () => void;
   readonly actions: ReadonlyArray<{
@@ -134,16 +138,29 @@ function FileHeader(props: {
           : undefined
       }
       actions={
-        props.fileInspectorSupported
+        props.canEditFile || props.fileInspectorSupported
           ? [
-              {
-                accessibilityLabel: panes.auxiliaryPaneVisible
-                  ? "Hide file navigator"
-                  : "Show file navigator",
-                icon: "sidebar.right",
-                selected: panes.auxiliaryPaneVisible,
-                onPress: toggleAuxiliaryPane,
-              },
+              ...(props.canEditFile
+                ? [
+                    {
+                      accessibilityLabel: "Edit file",
+                      icon: "pencil" as const,
+                      onPress: props.onEditFile,
+                    },
+                  ]
+                : []),
+              ...(props.fileInspectorSupported
+                ? [
+                    {
+                      accessibilityLabel: panes.auxiliaryPaneVisible
+                        ? "Hide file navigator"
+                        : "Show file navigator",
+                      icon: "sidebar.right" as const,
+                      selected: panes.auxiliaryPaneVisible,
+                      onPress: toggleAuxiliaryPane,
+                    },
+                  ]
+                : []),
             ]
           : undefined
       }
@@ -704,6 +721,23 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
       : null,
   );
   const fileData = fileQuery.data as ProjectReadFileResult | null;
+  const canWriteFiles = useAtomValue(projectEnvironment.writeFile.permissionAtom(environmentId));
+  const canEditFile =
+    canWriteFiles &&
+    relativePath !== null &&
+    canEditWorkspaceFile({ relativePath, file: fileData });
+
+  const handleEditFile = useCallback(() => {
+    if (environmentId === null || cwd === null || relativePath === null) {
+      return;
+    }
+    navigation.navigate("ThreadFileEdit", {
+      environmentId: String(environmentId),
+      ...(threadId === null ? {} : { threadId: String(threadId) }),
+      cwd,
+      path: relativePath.split("/").filter(Boolean),
+    });
+  }, [cwd, environmentId, navigation, relativePath, threadId]);
 
   const handleSelectFile = useCallback(
     (path: string) => {
@@ -931,6 +965,8 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
         iconColor={iconColor}
         activeMode={resolvedActiveMode}
         fileInspectorSupported={fileInspector.supported}
+        canEditFile={canEditFile}
+        onEditFile={handleEditFile}
         onBack={handleBack}
         onReturnToThread={handleReturnToThread}
         actions={fileMenuActions}

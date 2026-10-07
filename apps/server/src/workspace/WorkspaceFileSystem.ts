@@ -19,11 +19,14 @@ import type {
   ProjectWriteFileResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
@@ -95,11 +98,25 @@ export class WorkspaceBinaryFileError extends Schema.TaggedError<WorkspaceBinary
   }
 }
 
+export class WorkspaceFileChangedError extends Schema.TaggedError<WorkspaceFileChangedError>()(
+  "WorkspaceFileChangedError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Workspace file '${this.relativePath}' in '${this.workspaceRoot}' changed since it was read.`;
+  }
+}
+
 export const WorkspaceFileSystemError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
   WorkspaceBinaryFileError,
+  WorkspaceFileChangedError,
 ]);
 export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 
@@ -121,7 +138,8 @@ export class WorkspaceFileSystem extends Context.Service<
      * Write a file relative to the workspace root.
      *
      * Creates parent directories as needed and rejects paths that escape the
-     * workspace root.
+     * workspace root. With `expectedRevision`, writes only if the file still
+     * has that revision, failing with `WorkspaceFileChangedError` otherwise.
      */
     readonly writeFile: (
       input: ProjectWriteFileInput,
@@ -138,6 +156,14 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+  const crypto = yield* Crypto.Crypto;
+  // One write at a time, so a guarded write's revision check and its write cannot interleave
+  // with another client's save of the same file.
+  const writeSemaphore = yield* Semaphore.make(1);
+
+  /** The revision a complete read reports and a guarded write compares against. */
+  const fileRevision = (bytes: Uint8Array) =>
+    crypto.digest("SHA-256", bytes).pipe(Effect.map(Hex.encode), Effect.orDie);
 
   /**
    * Resolves the file a read targets. Workspace-relative paths must stay inside the
@@ -279,11 +305,15 @@ export const make = Effect.gen(function* () {
             });
           }
 
+          const truncated = stat.size > PROJECT_READ_FILE_MAX_BYTES;
+          // A short read holds only part of the file, so it gets no revision to write back with.
+          const complete = !truncated && bytesRead === stat.size;
           return {
             relativePath: target.relativePath,
             contents: new TextDecoder("utf-8").decode(fileBytes),
             byteLength: stat.size,
-            truncated: stat.size > PROJECT_READ_FILE_MAX_BYTES,
+            truncated,
+            ...(complete ? { revision: yield* fileRevision(fileBytes) } : {}),
           };
         }),
       (handle) =>
@@ -309,6 +339,30 @@ export const make = Effect.gen(function* () {
       workspaceRoot: input.cwd,
       relativePath: input.relativePath,
     });
+
+    if (input.expectedRevision !== undefined) {
+      const currentBytes = yield* fileSystem.readFile(target.absolutePath).pipe(
+        Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(null)),
+        Effect.mapError(
+          (cause) =>
+            new WorkspaceFileSystemOperationError({
+              workspaceRoot: input.cwd,
+              relativePath: input.relativePath,
+              resolvedPath: target.absolutePath,
+              operationPath: target.absolutePath,
+              operation: "read",
+              cause,
+            }),
+        ),
+      );
+      if (currentBytes === null || (yield* fileRevision(currentBytes)) !== input.expectedRevision) {
+        return yield* new WorkspaceFileChangedError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: target.absolutePath,
+        });
+      }
+    }
 
     yield* fileSystem.makeDirectory(path.dirname(target.absolutePath), { recursive: true }).pipe(
       Effect.mapError(
@@ -338,7 +392,7 @@ export const make = Effect.gen(function* () {
     );
     yield* workspaceEntries.refresh(input.cwd);
     return { relativePath: target.relativePath };
-  });
+  }, writeSemaphore.withPermits(1));
 
   return WorkspaceFileSystem.of({ readFile, writeFile });
 });
