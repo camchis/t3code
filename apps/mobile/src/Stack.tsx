@@ -48,6 +48,7 @@ import {
 import { ArchivedThreadsRouteScreen } from "./features/archive/ArchivedThreadsRouteScreen";
 import { ConnectOnboardingRouteScreen } from "./features/cloud/ConnectOnboardingRouteScreen";
 import { AttachmentFileScreen } from "./features/files/AttachmentFileScreen";
+import { FileEditorRouteScreen } from "./features/files/FileEditorRouteScreen";
 import { ThreadFilesTreeScreen, ThreadFileScreen } from "./features/files/ThreadFilesRouteScreen";
 import { AdaptiveWorkspaceLayout } from "./features/layout/AdaptiveWorkspaceLayout";
 import { selectedPullRequestKey } from "./features/pull-requests/pullRequestSelection";
@@ -857,6 +858,19 @@ const RootStackConfig = createWorkspaceStackNavigator({
       screen: ThreadFileScreen,
       linking: `${THREAD_LINKING_PREFIX}/files/:path*`,
       options: GLASS_HEADER_OPTIONS,
+    }),
+    // Deliberately has no `linking:` path. The editor carries a live draft and
+    // the read revision the save is guarded against — state no URL can
+    // reconstruct — so a path would only produce a link that cannot open it.
+    // Reached from `ThreadFile` (or `NewTaskFile` in a draft), which do link.
+    ThreadFileEdit: createNativeStackScreen({
+      screen: FileEditorRouteScreen,
+      options: {
+        presentation: "fullScreenModal",
+        headerShown: true,
+        gestureEnabled: false,
+        ...SOLID_HEADER_OPTIONS,
+      },
     }),
     ThreadMcpApp: createNativeStackScreen({
       screen: McpAppFullscreenScreen,

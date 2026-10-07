@@ -438,6 +438,12 @@ export const ProjectReadFileResult = Schema.Struct({
   truncated: Schema.Boolean,
   // Omitted by older servers; false only for an absent optional file.
   exists: Schema.optional(Schema.Boolean),
+  /**
+   * Identifies the bytes read, for `ProjectWriteFileInput.expectedRevision`. Present only for a
+   * complete read; servers that predate it never send one, so clients can treat it as the signal
+   * that guarded writes are supported.
+   */
+  revision: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type ProjectReadFileResult = typeof ProjectReadFileResult.Type;
 
@@ -447,6 +453,8 @@ export const ProjectFileFailure = Schema.Literals([
   "path_not_file",
   "binary_file",
   "operation_failed",
+  /** A guarded write found different contents, or no file, where it expected a revision. */
+  "file_changed",
 ]);
 export type ProjectFileFailure = typeof ProjectFileFailure.Type;
 
@@ -502,6 +510,11 @@ export const ProjectWriteFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
   contents: Schema.String,
+  /**
+   * Write only if the file still has this `ProjectReadFileResult.revision`; otherwise fail with
+   * `file_changed`. Omit it to overwrite unconditionally.
+   */
+  expectedRevision: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type ProjectWriteFileInput = typeof ProjectWriteFileInput.Type;
 
@@ -558,7 +571,9 @@ export class ProjectWriteFileError extends Schema.TaggedError<ProjectWriteFileEr
       ...props,
       message:
         decodedProjectErrorMessage(props) ??
-        `Failed to write workspace file '${props.relativePath}' in '${props.cwd}'.`,
+        (props.failure === "file_changed"
+          ? `Workspace file '${props.relativePath}' changed since it was read.`
+          : `Failed to write workspace file '${props.relativePath}' in '${props.cwd}'.`),
     } as any);
   }
 }
