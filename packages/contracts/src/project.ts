@@ -448,8 +448,8 @@ export const ProjectReadFileResult = Schema.Struct({
   truncated: Schema.Boolean,
   /**
    * Identifies the bytes read, for `ProjectWriteFileInput.expectedRevision`. Present only for a
-   * complete read; servers that predate it never send one, so clients can treat it as the signal
-   * that guarded writes are supported.
+   * complete, valid UTF-8 read. Older servers never send one, so clients can use its presence
+   * to detect support for guarded writes.
    */
   revision: Schema.optionalKey(TrimmedNonEmptyString),
 });
@@ -519,8 +519,10 @@ export const ProjectWriteFileInput = Schema.Struct({
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
   contents: Schema.String,
   /**
-   * Write only if the file still has this `ProjectReadFileResult.revision`; otherwise fail with
-   * `file_changed`. Omit it to overwrite unconditionally.
+   * Best-effort pre-write check against `ProjectReadFileResult.revision`; a mismatch fails
+   * with `file_changed`. Writes through this server to the same file are serialized, but this
+   * is not an atomic compare-and-write: external changes after the check may be overwritten.
+   * Omit it to overwrite unconditionally.
    */
   expectedRevision: Schema.optionalKey(TrimmedNonEmptyString),
 });

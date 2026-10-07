@@ -3,6 +3,9 @@ import * as NodeChildProcess from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, describe, expect } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -99,6 +102,50 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           expect(again.revision).toBe(first.revision);
           expect(changed.revision).not.toBe(first.revision);
         }),
+    );
+
+    it.effect("keeps invalid UTF-8 readable without offering a revision for editing", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const bytes = Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+        yield* fileSystem.writeFile(path.join(cwd, "legacy.txt"), bytes);
+
+        const result = yield* workspaceFileSystem.readFile({ cwd, relativePath: "legacy.txt" });
+
+        expect(result.contents).toBe("caf\uFFFD\n");
+        expect(result.truncated).toBe(false);
+        expect(result.revision).toBeUndefined();
+        expect(Array.from(yield* fileSystem.readFile(path.join(cwd, "legacy.txt")))).toEqual(
+          Array.from(bytes),
+        );
+      }),
+    );
+
+    it.effect("preserves a UTF-8 BOM through a guarded edit", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "bom.txt", "\uFEFFone\r\n");
+        const original = yield* workspaceFileSystem.readFile({ cwd, relativePath: "bom.txt" });
+        expect(original.contents).toBe("\uFEFFone\r\n");
+        expect(original.revision).toEqual(expect.any(String));
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "bom.txt",
+          contents: original.contents.replace("one", "two"),
+          expectedRevision: original.revision!,
+        });
+
+        expect(Array.from(yield* fileSystem.readFile(path.join(cwd, "bom.txt")))).toEqual(
+          Array.from(new TextEncoder().encode("\uFEFFtwo\r\n")),
+        );
+      }),
     );
 
     it.effect("omits the revision for a truncated read", () =>
@@ -469,6 +516,129 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           .stat(path.join(cwd, "src/index.ts"))
           .pipe(Effect.orElseSucceed(() => null));
         expect(stat).toBeNull();
+      }),
+    );
+
+    it.effect("serializes guarded saves to one file without blocking another file", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "first.txt", "original");
+        yield* writeTextFile(cwd, "other.txt", "original");
+        const writeEntered = yield* Deferred.make<void>();
+        const releaseWrite = yield* Deferred.make<void>();
+        const service = yield* WorkspaceFileSystem.make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fileSystem,
+            writeFileString: (filePath, contents, options) =>
+              Effect.gen(function* () {
+                if (contents === "first save") {
+                  yield* Deferred.succeed(writeEntered, undefined);
+                  yield* Deferred.await(releaseWrite);
+                }
+                yield* fileSystem.writeFileString(filePath, contents, options);
+              }),
+          }),
+        );
+        const original = yield* service.readFile({ cwd, relativePath: "first.txt" });
+        const first = yield* service
+          .writeFile({
+            cwd,
+            relativePath: "first.txt",
+            contents: "first save",
+            expectedRevision: original.revision!,
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(writeEntered);
+        const second = yield* service
+          .writeFile({
+            cwd,
+            relativePath: "./first.txt",
+            contents: "second save",
+            expectedRevision: original.revision!,
+          })
+          .pipe(Effect.flip, Effect.forkChild);
+
+        // This must finish while the first file's write is still blocked.
+        yield* service.writeFile({ cwd, relativePath: "other.txt", contents: "independent" });
+        expect(yield* fileSystem.readFileString(path.join(cwd, "other.txt"))).toBe("independent");
+        yield* Deferred.succeed(releaseWrite, undefined);
+        yield* Fiber.join(first);
+        expect((yield* Fiber.join(second))._tag).toBe("WorkspaceFileChangedError");
+        expect(yield* fileSystem.readFileString(path.join(cwd, "first.txt"))).toBe("first save");
+      }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)("guards concurrent saves through symlink aliases", () =>
+      Effect.gen(function* () {
+        const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "file.txt", "original");
+        yield* fs.symlink(path.join(cwd, "file.txt"), path.join(cwd, "link.txt"));
+        const original = yield* service.readFile({ cwd, relativePath: "file.txt" });
+        const results = yield* Effect.forEach(
+          ["file.txt", "link.txt"],
+          (relativePath) =>
+            service
+              .writeFile({
+                cwd,
+                relativePath,
+                contents: relativePath,
+                expectedRevision: original.revision!,
+              })
+              .pipe(Effect.exit),
+          { concurrency: "unbounded" },
+        );
+        expect(results.filter(Exit.isSuccess)).toHaveLength(1);
+        const saved = yield* fs.readFileString(path.join(cwd, "file.txt"));
+        expect(["file.txt", "link.txt"]).toContain(saved);
+      }),
+    );
+
+    it.effect("releases the file lock before refreshing the workspace index", () =>
+      Effect.gen(function* () {
+        const entries = yield* WorkspaceEntries.WorkspaceEntries;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "file.txt", "original");
+        const refreshEntered = yield* Deferred.make<void>();
+        const releaseRefresh = yield* Deferred.make<void>();
+        let firstRefresh = true;
+        const service = yield* WorkspaceFileSystem.make.pipe(
+          Effect.provideService(WorkspaceEntries.WorkspaceEntries, {
+            ...entries,
+            refresh: () =>
+              Effect.gen(function* () {
+                if (firstRefresh) {
+                  firstRefresh = false;
+                  yield* Deferred.succeed(refreshEntered, undefined);
+                  yield* Deferred.await(releaseRefresh);
+                }
+              }),
+          }),
+        );
+        const first = yield* service
+          .writeFile({
+            cwd,
+            relativePath: "file.txt",
+            contents: "first save",
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(refreshEntered);
+        const current = yield* service.readFile({ cwd, relativePath: "file.txt" });
+        yield* service.writeFile({
+          cwd,
+          relativePath: "file.txt",
+          contents: "second save",
+          expectedRevision: current.revision!,
+        });
+        expect((yield* service.readFile({ cwd, relativePath: "file.txt" })).contents).toBe(
+          "second save",
+        );
+        yield* Deferred.succeed(releaseRefresh, undefined);
+        yield* Fiber.join(first);
       }),
     );
 

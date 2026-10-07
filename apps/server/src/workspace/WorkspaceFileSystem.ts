@@ -9,6 +9,7 @@
  *
  * @module WorkspaceFileSystem
  */
+import * as NodeBuffer from "node:buffer";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
@@ -26,7 +27,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
@@ -138,8 +139,10 @@ export class WorkspaceFileSystem extends Context.Service<
      * Write a file relative to the workspace root.
      *
      * Creates parent directories as needed and rejects paths that escape the
-     * workspace root. With `expectedRevision`, writes only if the file still
-     * has that revision, failing with `WorkspaceFileChangedError` otherwise.
+     * workspace root. `expectedRevision` is a best-effort pre-write check, failing
+     * with `WorkspaceFileChangedError` on a mismatch. Service writes to the same
+     * file are serialized, but external changes after the check may be overwritten;
+     * this is not an atomic compare-and-write.
      */
     readonly writeFile: (
       input: ProjectWriteFileInput,
@@ -157,9 +160,7 @@ export const make = Effect.gen(function* () {
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const crypto = yield* Crypto.Crypto;
-  // One write at a time, so a guarded write's revision check and its write cannot interleave
-  // with another client's save of the same file.
-  const writeSemaphore = yield* Semaphore.make(1);
+  const writeLocks = yield* KeyedLock.make<string>();
 
   /** The revision a complete read reports and a guarded write compares against. */
   const fileRevision = (bytes: Uint8Array) =>
@@ -308,12 +309,14 @@ export const make = Effect.gen(function* () {
           const truncated = stat.size > PROJECT_READ_FILE_MAX_BYTES;
           // A short read holds only part of the file, so it gets no revision to write back with.
           const complete = !truncated && bytesRead === stat.size;
+          // Lossy previews remain readable, but cannot become editable drafts.
+          const editable = complete && NodeBuffer.isUtf8(fileBytes);
           return {
             relativePath: target.relativePath,
-            contents: new TextDecoder("utf-8").decode(fileBytes),
+            contents: new TextDecoder("utf-8", { ignoreBOM: true }).decode(fileBytes),
             byteLength: stat.size,
             truncated,
-            ...(complete ? { revision: yield* fileRevision(fileBytes) } : {}),
+            ...(editable ? { revision: yield* fileRevision(fileBytes) } : {}),
           };
         }),
       (handle) =>
@@ -340,44 +343,9 @@ export const make = Effect.gen(function* () {
       relativePath: input.relativePath,
     });
 
-    if (input.expectedRevision !== undefined) {
-      const currentBytes = yield* fileSystem.readFile(target.absolutePath).pipe(
-        Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(null)),
-        Effect.mapError(
-          (cause) =>
-            new WorkspaceFileSystemOperationError({
-              workspaceRoot: input.cwd,
-              relativePath: input.relativePath,
-              resolvedPath: target.absolutePath,
-              operationPath: target.absolutePath,
-              operation: "read",
-              cause,
-            }),
-        ),
-      );
-      if (currentBytes === null || (yield* fileRevision(currentBytes)) !== input.expectedRevision) {
-        return yield* new WorkspaceFileChangedError({
-          workspaceRoot: input.cwd,
-          relativePath: input.relativePath,
-          resolvedPath: target.absolutePath,
-        });
-      }
-    }
-
-    yield* fileSystem.makeDirectory(path.dirname(target.absolutePath), { recursive: true }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new WorkspaceFileSystemOperationError({
-            workspaceRoot: input.cwd,
-            relativePath: input.relativePath,
-            resolvedPath: target.absolutePath,
-            operationPath: path.dirname(target.absolutePath),
-            operation: "make-directory",
-            cause,
-          }),
-      ),
-    );
-    yield* fileSystem.writeFileString(target.absolutePath, input.contents).pipe(
+    // Canonicalize existing files so symlink aliases share the same lock.
+    const lockPath = yield* fileSystem.realPath(target.absolutePath).pipe(
+      Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(target.absolutePath)),
       Effect.mapError(
         (cause) =>
           new WorkspaceFileSystemOperationError({
@@ -385,14 +353,74 @@ export const make = Effect.gen(function* () {
             relativePath: input.relativePath,
             resolvedPath: target.absolutePath,
             operationPath: target.absolutePath,
-            operation: "write-file",
+            operation: "realpath-target",
             cause,
           }),
       ),
     );
+    yield* writeLocks.withLock(
+      lockPath,
+      Effect.gen(function* () {
+        if (input.expectedRevision !== undefined) {
+          const currentBytes = yield* fileSystem.readFile(target.absolutePath).pipe(
+            Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(null)),
+            Effect.mapError(
+              (cause) =>
+                new WorkspaceFileSystemOperationError({
+                  workspaceRoot: input.cwd,
+                  relativePath: input.relativePath,
+                  resolvedPath: target.absolutePath,
+                  operationPath: target.absolutePath,
+                  operation: "read",
+                  cause,
+                }),
+            ),
+          );
+          if (
+            currentBytes === null ||
+            (yield* fileRevision(currentBytes)) !== input.expectedRevision
+          ) {
+            return yield* new WorkspaceFileChangedError({
+              workspaceRoot: input.cwd,
+              relativePath: input.relativePath,
+              resolvedPath: target.absolutePath,
+            });
+          }
+        }
+
+        yield* fileSystem
+          .makeDirectory(path.dirname(target.absolutePath), { recursive: true })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new WorkspaceFileSystemOperationError({
+                  workspaceRoot: input.cwd,
+                  relativePath: input.relativePath,
+                  resolvedPath: target.absolutePath,
+                  operationPath: path.dirname(target.absolutePath),
+                  operation: "make-directory",
+                  cause,
+                }),
+            ),
+          );
+        yield* fileSystem.writeFileString(target.absolutePath, input.contents).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WorkspaceFileSystemOperationError({
+                workspaceRoot: input.cwd,
+                relativePath: input.relativePath,
+                resolvedPath: target.absolutePath,
+                operationPath: target.absolutePath,
+                operation: "write-file",
+                cause,
+              }),
+          ),
+        );
+      }),
+    );
     yield* workspaceEntries.refresh(input.cwd);
     return { relativePath: target.relativePath };
-  }, writeSemaphore.withPermits(1));
+  });
 
   return WorkspaceFileSystem.of({ readFile, writeFile });
 });
