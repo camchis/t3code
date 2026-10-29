@@ -13,8 +13,8 @@ import { Alert, Platform, TextInput, View } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { EmptyState } from "../../components/EmptyState";
-import { ScreenHeader } from "../../components/ScreenHeader";
+import { AppBar } from "../../components/ui/AppBar";
+import { EmptyState } from "../../components/ui/EmptyState";
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -175,6 +175,7 @@ export function FileEditorRouteScreen(props: FileEditorRouteScreenProps) {
       },
     ]);
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- schedules a native frame callback and pops the navigator after a save; cleaned up on unmount
   useEffect(() => {
     if (!saved) return;
     // Let the native removal guard turn off before popping the saved file.
@@ -198,7 +199,7 @@ export function FileEditorRouteScreen(props: FileEditorRouteScreenProps) {
 
   return (
     <View className="flex-1 bg-sheet">
-      <ScreenHeader
+      <AppBar
         title={basename(relativePath)}
         subtitle={relativePath}
         sidebar={false}

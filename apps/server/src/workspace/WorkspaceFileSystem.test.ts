@@ -165,23 +165,6 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
   });
 
   describe("readFile", () => {
-        yield* writeTextFile(cwd, "src/index.ts", "export const answer = 42;\n");
-
-        const result = yield* workspaceFileSystem.readFile({
-          cwd,
-          relativePath: "src/index.ts",
-        });
-
-        expect(result).toEqual({
-          relativePath: "src/index.ts",
-          contents: "export const answer = 42;\n",
-          byteLength: 26,
-          truncated: false,
-          revision: expect.any(String),
-        });
-      }),
-    );
-
     it.effect(
       "reports a revision that is stable across identical bytes and changes with contents",
       () =>
@@ -305,6 +288,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           contents: "# Notes\n",
           byteLength: 8,
           truncated: false,
+          revision: expect.any(String),
         });
       }),
     );
@@ -671,7 +655,6 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
     );
 
     it.effect("refuses writes into git's own folders", () =>
-    it.effect("writes when the revision from a prior read still matches", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -746,6 +729,37 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
     );
 
     it.effect("writes files that sit beside git's folders", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const parentDir = yield* makeTempDir;
+        const bare = path.join(parentDir, "repo.git");
+        yield* writeTextFile(bare, "HEAD", "ref: refs/heads/main\n");
+        yield* writeTextFile(bare, "objects/info/packs");
+        yield* writeTextFile(bare, "refs/heads/main");
+        yield* writeTextFile(bare, "main/.git", `gitdir: ${path.join(bare, "worktrees/main")}\n`);
+
+        for (const [cwd, relativePath] of [
+          [path.join(bare, "main"), ".gitignore"],
+          [path.join(bare, "main"), ".gitattributes"],
+          [path.join(bare, "main"), ".github/workflows/ci.yml"],
+          [path.join(bare, "main"), "vendor/lib.git/README.md"],
+          [path.join(bare, "main/.github"), "CODEOWNERS"],
+          [bare, "main/plan.md"],
+        ] as const) {
+          yield* workspaceFileSystem.writeFile({ cwd, relativePath, contents: "ok\n" });
+          expect(yield* fileSystem.readFileString(path.join(cwd, relativePath))).toBe("ok\n");
+        }
+      }),
+    );
+
+    it.effect("writes when the revision from a prior read still matches", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
         yield* writeTextFile(cwd, "src/index.ts", "export const answer = 42;\n");
         const revision = (yield* workspaceFileSystem.readFile({
           cwd,
@@ -773,24 +787,6 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const parentDir = yield* makeTempDir;
-        const bare = path.join(parentDir, "repo.git");
-        yield* writeTextFile(bare, "HEAD", "ref: refs/heads/main\n");
-        yield* writeTextFile(bare, "objects/info/packs");
-        yield* writeTextFile(bare, "refs/heads/main");
-        yield* writeTextFile(bare, "main/.git", `gitdir: ${path.join(bare, "worktrees/main")}\n`);
-
-        for (const [cwd, relativePath] of [
-          [path.join(bare, "main"), ".gitignore"],
-          [path.join(bare, "main"), ".gitattributes"],
-          [path.join(bare, "main"), ".github/workflows/ci.yml"],
-          [path.join(bare, "main"), "vendor/lib.git/README.md"],
-          [path.join(bare, "main/.github"), "CODEOWNERS"],
-          [bare, "main/plan.md"],
-        ] as const) {
-          yield* workspaceFileSystem.writeFile({ cwd, relativePath, contents: "ok\n" });
-          expect(yield* fileSystem.readFileString(path.join(cwd, relativePath))).toBe("ok\n");
-        }
         const cwd = yield* makeTempDir;
         yield* writeTextFile(cwd, "src/index.ts", "export const answer = 42;\n");
         const revision = (yield* workspaceFileSystem.readFile({
@@ -861,18 +857,22 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         yield* writeTextFile(cwd, "other.txt", "original");
         const writeEntered = yield* Deferred.make<void>();
         const releaseWrite = yield* Deferred.make<void>();
+        let firstWrite = true;
+        // makeDirectory runs inside the file lock, before the write.
         const service = yield* WorkspaceFileSystem.make.pipe(
           Effect.provideService(FileSystem.FileSystem, {
             ...fileSystem,
-            writeFileString: (filePath, contents, options) =>
+            makeDirectory: (dirPath, options) =>
               Effect.gen(function* () {
-                if (contents === "first save") {
+                if (firstWrite) {
+                  firstWrite = false;
                   yield* Deferred.succeed(writeEntered, undefined);
                   yield* Deferred.await(releaseWrite);
                 }
-                yield* fileSystem.writeFileString(filePath, contents, options);
+                yield* fileSystem.makeDirectory(dirPath, options);
               }),
           }),
+          Effect.provide(layerKnownWorkspacesTest),
         );
         const original = yield* service.readFile({ cwd, relativePath: "first.txt" });
         const first = yield* service
@@ -951,6 +951,8 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
                 }
               }),
           }),
+
+          Effect.provide(layerKnownWorkspacesTest),
         );
         const first = yield* service
           .writeFile({
