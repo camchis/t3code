@@ -313,6 +313,11 @@ const handlers = {
           : yield* devices
               .locateSession({ threadId: scope.thread.threadId, deviceId, hostId: input.hostId })
               .pipe(mapLocateErrors);
+      if (input.shutdown === true && deviceId !== undefined && Option.isNone(open)) {
+        return yield* new DeviceToolUnavailableError({
+          reason: `Device ${deviceId} is not open in this thread, so it was not shut down. Call device_open on it, then device_close with shutdown: true.`,
+        });
+      }
       const hostId = Option.isSome(open) ? open.value.hostId : input.hostId;
       yield* devices.close({
         threadId: scope.thread.threadId,

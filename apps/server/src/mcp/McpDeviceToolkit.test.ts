@@ -598,6 +598,12 @@ describe("device targeting across hosts", () => {
       Effect.gen(function* () {
         expect((yield* call("device_close", { deviceId: "MAC-UDID" })).isError).toBe(false);
         expect((yield* call("device_close", { deviceId: "Pixel_9" })).isError).toBe(false);
+        // Nothing open here is shut down, so success would leave the device running unnoticed.
+        const shutdown = yield* call("device_close", { deviceId: "Pixel_9", shutdown: true });
+        expect(shutdown.isError).toBe(true);
+        expect(text(shutdown)).toBe(
+          "Device Pixel_9 is not open in this thread, so it was not shut down. Call device_open on it, then device_close with shutdown: true.",
+        );
         expect(closed).toEqual([
           { hostId: "mac-mini", deviceId: "MAC-UDID" },
           { hostId: undefined, deviceId: "Pixel_9" },
