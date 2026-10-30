@@ -525,6 +525,30 @@ it.effect("bounds large ARIA trees without dropping every server locator", () =>
   ).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("returns a snapshot whose page drew no screenshot, saying why no image came", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const accessibilityTree = '- button "Save" [ref=t3-snapshot-e1]';
+      yield* serveSnapshots("mcp-no-screenshot", {
+        ...snapshotResult,
+        accessibilityTree,
+        screenshot: null,
+      });
+
+      const snapshot = yield* callSnapshot({ includeImage: true, save: true });
+
+      expect(snapshot.isError).toBe(false);
+      expect(snapshot.structuredContent).toMatchObject({ accessibilityTree, screenshot: null });
+      expect(snapshot.structuredContent).not.toHaveProperty("screenshotPath");
+      expect(snapshot.content.map((content) => content.type)).toEqual(["text", "text", "text"]);
+      expect(snapshot.content.at(-1)).toEqual({
+        type: "text",
+        text: McpHttpServer.NO_SCREENSHOT_NOTICE,
+      });
+    }),
+  ).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("keeps the snapshot text under the agent's output ceiling", () =>
   Effect.scoped(
     Effect.gen(function* () {

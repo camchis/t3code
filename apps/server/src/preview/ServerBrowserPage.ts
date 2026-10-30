@@ -206,6 +206,8 @@ const withoutTreeDataPayloads = (tree: string) =>
 // The broker waits 15s for the host; a snapshot, retry included, answers well before.
 const SNAPSHOT_TIMEOUT_MS = 10_000;
 const FRAME_ANSWER_MS = 1_000;
+// A screenshot still pending this close to the deadline is dropped so the tree still returns.
+const SCREENSHOT_MARGIN_MS = 500;
 
 // Include password and CSS-masked text in open shadow roots, normalized like accessible text.
 const DOTTED_SCRIPT = `(() => {
@@ -236,6 +238,7 @@ const tooBusy = () =>
   new ServerBrowserOperationError(
     "PreviewAutomationTimeoutError",
     "The page was too busy to capture a snapshot in time. Wait for it to settle and take another snapshot.",
+    { timeoutMs: SNAPSHOT_TIMEOUT_MS },
   );
 
 const VALUE_TOO_LONG = "A password field holds a value too long to hide, so no snapshot was taken.";
@@ -250,6 +253,15 @@ const answered = <A>(promise: Promise<A>) => {
     timer = setTimeout(() => resolve(undefined), FRAME_ANSWER_MS);
   });
   return Promise.race([promise.catch(() => undefined), late]).finally(() => clearTimeout(timer));
+};
+
+/** Returns undefined if the promise has not settled by `at`; a rejection still rejects. */
+const settledBy = <A>(promise: Promise<A>, at: number) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), Math.max(0, at - Date.now()));
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 };
 
 /** Isolated worlds prevent spoofing; desktop out-of-process frames use page worlds. Missing own-frame reads or changed frames fail; other missing reads return undefined. */
@@ -535,18 +547,17 @@ const capture = async (
   const { readers, read } = await openReaders(input.page, input.cdp);
   const before = await read();
   // Bracket the tree with value reads to detect changes; await tree completion before retrying failed captures.
-  const pageAndScreenshot = Promise.all([
-    input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
-      Pick<
-        PreviewAutomationSnapshot,
-        "url" | "title" | "loading" | "visibleText" | "interactiveElements"
-      >
-    >,
-    captureViewport(input.cdp, { format: "png" }).then((png) =>
-      scale < 1 ? shrinkPng(input.cdp, png, scale) : png,
-    ),
-  ]);
-  void pageAndScreenshot.catch(constVoid);
+  const pageState = input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
+    Pick<
+      PreviewAutomationSnapshot,
+      "url" | "title" | "loading" | "visibleText" | "interactiveElements"
+    >
+  >;
+  const screenshot = captureViewport(input.cdp, { format: "png" }).then((png) =>
+    scale < 1 ? shrinkPng(input.cdp, png, scale) : png,
+  );
+  void pageState.catch(constVoid);
+  void screenshot.catch(constVoid);
   // Leaves time for the second read; a frame that never loads holds the tree until then.
   const tree = await input.page.ariaSnapshot({
     mode: "ai",
@@ -568,7 +579,9 @@ const capture = async (
     void iframe.dispose().catch(constVoid);
     if (frame && unread.includes(frame)) throw tooBusy();
   }
-  const [page, data] = await pageAndScreenshot;
+  const page = await pageState;
+  // A desktop tab paints no frame while its machine's screen is locked or asleep.
+  const data = await settledBy(screenshot, deadline - SCREENSHOT_MARGIN_MS);
   if (state.generation !== generation) throw pageChanged();
   const mask = (text: string) => (dotted ? text.replace(dotted, MASKED_VALUE) : text);
   // Redacted before the cut, so a payload crossing it can't leave its start showing, and before
@@ -589,11 +602,7 @@ const capture = async (
     consoleEntries: [...input.consoleEntries],
     networkEntries: [...input.networkEntries],
     actionTimeline: [...input.actionTimeline],
-    screenshot: {
-      mimeType: "image/png",
-      data,
-      ...pngSize(data),
-    },
+    screenshot: data === undefined ? null : { mimeType: "image/png", data, ...pngSize(data) },
   };
 };
 

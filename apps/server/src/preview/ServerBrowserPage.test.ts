@@ -5,7 +5,16 @@ import {
   type CDPSession,
   type Page,
 } from "playwright-core";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vite-plus/test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vite-plus/test";
 
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 
@@ -291,6 +300,7 @@ describe("server browser snapshot screenshot", () => {
       networkEntries: [],
       actionTimeline: [],
     });
+    if (!screenshot) throw new Error("A headless page always paints a screenshot.");
     // The server has no DOM types, so the decoder runs as page source.
     const points = [
       [0.15, 0.75],
@@ -344,7 +354,73 @@ describe("server browser snapshot screenshot", () => {
       actionTimeline: [],
     });
 
-    expect([screenshot.width, screenshot.height]).toEqual([1280, 800]);
+    expect([screenshot?.width, screenshot?.height]).toEqual([1280, 800]);
+  });
+});
+
+describe("server browser snapshot of a page that draws no frame", () => {
+  // A desktop guest paints nothing while its machine's screen is locked or asleep.
+  const fakeTab = (overrides: { readonly ariaSnapshot?: () => Promise<string> } = {}) => {
+    const page = {
+      on: () => page,
+      frames: () => [page],
+      mainFrame: () => page,
+      viewportSize: () => ({ width: 1280, height: 800 }),
+      evaluate: async () => ({
+        url: "https://example.com/",
+        title: "Example",
+        loading: false,
+        visibleText: "Example Domain",
+        interactiveElements: [],
+      }),
+      ariaSnapshot: overrides.ariaSnapshot ?? (async () => '- link "Learn more" [ref=e1]'),
+    };
+    const cdp = {
+      send: async (method: string) => {
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+        if (method === "Runtime.evaluate") return { result: { value: [] } };
+        return new Promise(() => {});
+      },
+    };
+    return ServerBrowserPage.snapshot({
+      page: page as unknown as Page,
+      cdp: cdp as unknown as CDPSession,
+      renderScale: 1,
+      consoleEntries: [],
+      networkEntries: [],
+      actionTimeline: [],
+    });
+  };
+
+  it("returns the tree and text without a screenshot the page never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const snapshotting = fakeTab();
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await snapshotting;
+
+      expect(result.screenshot).toBeNull();
+      expect(result.visibleText).toBe("Example Domain");
+      expect(result.accessibilityTree).toMatch(/link "Learn more" \[ref=t3-/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports its own budget when even the tree does not answer", async () => {
+    vi.useFakeTimers();
+    try {
+      const snapshotting = fakeTab({ ariaSnapshot: () => new Promise(() => {}) });
+      const failed = expect(snapshotting).rejects.toMatchObject({
+        tag: "PreviewAutomationTimeoutError",
+        detail: { timeoutMs: 10_000 },
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await failed;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
