@@ -268,6 +268,9 @@ const hasLongString = (entry: unknown, max: number) =>
   entry !== null &&
   Object.values(entry).some((value) => typeof value === "string" && value.length > max);
 
+export const NO_SCREENSHOT_NOTICE =
+  "No screenshot: the page drew no frame in time, as happens while the host machine's screen is locked or asleep. The page state above is current, and another snapshot may not add an image until the screen wakes.";
+
 type SnapshotMetadata = {
   readonly url: string;
   readonly title: string;
@@ -540,12 +543,14 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                   readonly data: string;
                   readonly width: number;
                   readonly height: number;
-                };
+                } | null;
               };
               const { screenshot, ...page } = snapshot;
-              const png = new Uint8Array(Buffer.from(screenshot.data, "base64"));
+              const png = screenshot && new Uint8Array(Buffer.from(screenshot.data, "base64"));
               const screenshotPath =
-                payload?.save === true ? yield* saveScreenshot(snapshot.url, png) : undefined;
+                payload?.save === true && png
+                  ? yield* saveScreenshot(snapshot.url, png)
+                  : undefined;
               // Providers replay images on later requests, and some reject them; include images only when requested.
               const includeImage = payload?.includeImage === true;
               if (screenshotPath !== undefined && !includeImage) {
@@ -561,7 +566,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
               }
               const metadata = {
                 ...page,
-                screenshot: {
+                screenshot: screenshot && {
                   mimeType: screenshot.mimeType,
                   width: screenshot.width,
                   height: screenshot.height,
@@ -591,9 +596,11 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                           text: `Snapshot text was bounded. Omitted: ${bounded.omitted.join("; ")}.`,
                         },
                       ]),
-                  ...(includeImage
-                    ? [{ type: "image" as const, data: png, mimeType: screenshot.mimeType }]
-                    : []),
+                  ...(png === null
+                    ? [{ type: "text" as const, text: NO_SCREENSHOT_NOTICE }]
+                    : includeImage
+                      ? [{ type: "image" as const, data: png, mimeType: "image/png" }]
+                      : []),
                 ],
               });
             }),

@@ -688,6 +688,44 @@ it.live("streams to a read-only viewer without allowing takeover, input, or view
 );
 
 it.live(
+  "a viewer's unanswered still holds back neither its attach, snapshots, nor later calls",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { browser, broker, tabId } = yield* ready;
+        const context = contexts[0]!;
+        const newSession = context.newCDPSession;
+        // A desktop guest that never paints never answers a screenshot.
+        context.newCDPSession = async (target) => {
+          const session = await newSession(target);
+          const send = session.send.getMockImplementation()!;
+          session.send.mockImplementation((method, input) =>
+            method === "Page.captureScreenshot" ? new Promise(() => {}) : send(method, input),
+          );
+          return session;
+        };
+        yield* browser.attachViewer(viewerInput(tabId, false));
+
+        const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
+          scope,
+          tabId,
+          operation: "snapshot",
+          input: {},
+        });
+        expect(snapshot.accessibilityTree).toContain('button "delete"');
+        expect(
+          yield* broker.invoke({
+            scope,
+            tabId,
+            operation: "evaluate",
+            input: { expression: "next()" },
+          }),
+        ).toBe("evaluated");
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live(
   "takeover waits for the running agent and revokes snapshot refs before returning control",
   () =>
     Effect.scoped(
