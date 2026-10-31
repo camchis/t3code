@@ -5,7 +5,7 @@ import { expect, it, vi } from "vite-plus/test";
 import type { WorkspaceSearchMode } from "../workspace/workspace-tabs-state";
 import { useRestoreOffsetAfterSearch } from "./useRestoreOffsetAfterSearch";
 
-type Props = { mode: WorkspaceSearchMode; offset: number | undefined };
+type Props = { mode: WorkspaceSearchMode | undefined; offset: number | undefined };
 
 function mountProbe() {
   const restore = vi.fn();
@@ -24,6 +24,9 @@ function mountProbe() {
 it("leaves the list where UIKit rested it when Home mounts at rest", async () => {
   using screen = mountProbe();
   await screen.render({ mode: "resting", offset: 0 });
+  await screen.render({ mode: "resting", offset: 0 });
+  expect(screen.restore).not.toHaveBeenCalled();
+  await screen.render({ mode: undefined, offset: undefined });
   await screen.render({ mode: "resting", offset: 0 });
   expect(screen.restore).not.toHaveBeenCalled();
 });
